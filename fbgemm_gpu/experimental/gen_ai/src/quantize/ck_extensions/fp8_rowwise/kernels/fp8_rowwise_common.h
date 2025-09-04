@@ -22,6 +22,7 @@
 #include "ck/utility/data_type.hpp"
 
 #include "ck/tensor_operation/gpu/device/impl/device_gemm_multiple_d_xdl_cshuffle_v3.hpp"
+#include "ck/tensor_operation/gpu/device/impl/device_gemm_multiple_d_xdl_cshuffle_v3_b_preshuffle.hpp"
 
 // Define commonly used types.
 template <ck::index_t... Is>
@@ -118,7 +119,7 @@ at::Tensor f8f8_rowwise_impl(
     int KBatch = 1) {
   // Create GEMM definition.
   using DeviceGemmInstance =
-      ck::tensor_operation::device::DeviceGemmMultiD_Xdl_CShuffle_V3<
+      ck::tensor_operation::device::DeviceGemmMultiD_Xdl_CShuffle_V3_BPreshuffle<
           ALayout,
           BLayout,
           DsLayout,
