@@ -17,12 +17,12 @@ fp8fp8bf16_rowwise_256x256x192x128_16x16_8x6_8x32x1_8x32x1_1x32x1x8_8x8x1_1x2_in
     at::Tensor Y) {
   return f8f8bf16_rowwise_wrapper<
       256,// block size
-      224, // Mblock
+      256, // Mblock
       256, // nblock
       128, // kblock
       16, // wave tile M
       16, // wave tile N
-      14, // wave map M 
+      16, // wave map M 
       4, // wave map N 
       S<8, 32, 1>, // ABLOCK_TRANSFER
       S<8, 32, 1>, // BBLOCK_TRANSFER
