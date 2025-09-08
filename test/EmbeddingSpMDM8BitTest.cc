@@ -6,11 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include <algorithm>
-#include <numeric>
-#include <ostream>
 #include <random>
-#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -58,7 +54,7 @@ class Fused8BitRowwiseEmbeddingLookupTest
           EmbeddingSpMDMOutputDtypeChoice>> {};
 }; // namespace
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     InstantiationName,
     Fused8BitRowwiseEmbeddingLookupTest,
     ::testing::Combine(
@@ -87,11 +83,7 @@ TEST_P(Fused8BitRowwiseEmbeddingLookupTest, basicTest) {
   bool use_offsets = bool_dist(generator);
   bool scale_bias_last = bool_dist(generator);
 
-  int prefetch = 0;
-  EmbeddingSpMDMWeightChoice weight_choice;
-  EmbeddingSpMDMCornerCase corner_case;
-  EmbeddingSpMDMOutputDtypeChoice out_type;
-  tie(prefetch, weight_choice, corner_case, out_type) = GetParam();
+  auto [prefetch, weight_choice, corner_case, out_type] = GetParam();
   bool is_wt_positional = weight_choice == POSITIONAL_WEIGHTED;
   bool use_weight = weight_choice != UNWEIGHTED;
 
@@ -106,7 +98,8 @@ TEST_P(Fused8BitRowwiseEmbeddingLookupTest, basicTest) {
     return;
   }
 
-  for (auto input : inputs) {
+  for (size_t h = 0; h < inputs.size(); ++h) {
+    auto input = inputs[h];
     int batch_size = input[0];
     int num_rows = input[1];
     int embedding_dim = input[2];
@@ -300,8 +293,14 @@ TEST_P(Fused8BitRowwiseEmbeddingLookupTest, basicTest) {
             ? output_ref[i]
             : convert_to_float_ref(output_ref_16b[i], out_type == BFLOAT16);
         EXPECT_EQ(actual, expected)
-            << "results differ at (" << i << ") reference: " << expected
-            << ", FBGEMM: " << actual << " emb dim :" << embedding_dim;
+            << "results differ at (" << i << ") from " << output.size()
+            << " reference: " << expected << ", FBGEMM: " << actual
+            << " emb dim :" << embedding_dim << " batch_size :" << batch_size
+            << " num_rows :" << num_rows << " lengths_sum :" << lengths_sum
+            << " corner_case :" << corner_case << " use_weight :" << use_weight
+            << " normalize_by_lengths :" << normalize_by_lengths
+            << " is_wt_pos " << is_wt_positional << " scale_bias_last "
+            << scale_bias_last << " out_type " << out_type;
       }
       for (int offset = output_size_wo_sentries;
            offset < output_size_wo_sentries + num_sentries;
@@ -314,8 +313,10 @@ TEST_P(Fused8BitRowwiseEmbeddingLookupTest, basicTest) {
             : convert_to_float_ref(
                   output_ref_16b[offset], out_type == BFLOAT16);
         EXPECT_EQ(actual, expected)
-            << "results differ at (" << offset << ") reference: " << expected
-            << ", FBGEMM: " << actual << " emb dim :" << embedding_dim;
+            << "results differ at (" << offset << ") from "
+            << output_size_wo_sentries + num_sentries
+            << " reference: " << expected << ", FBGEMM: " << actual
+            << " emb dim :" << embedding_dim;
       }
     }
   } // end for input
@@ -334,11 +335,7 @@ TEST_P(Fused8BitRowwiseEmbeddingLookupTest, rowwiseSparseTest) {
   bool use_offsets = bool_dist(generator);
   bool scale_bias_last = bool_dist(generator);
 
-  int prefetch = 0;
-  EmbeddingSpMDMWeightChoice weight_choice;
-  EmbeddingSpMDMCornerCase corner_case;
-  EmbeddingSpMDMDtypeChoice out_type;
-  tie(prefetch, weight_choice, corner_case, out_type) = GetParam();
+  auto [prefetch, weight_choice, corner_case, out_type] = GetParam();
   bool is_wt_positional = weight_choice == POSITIONAL_WEIGHTED;
   bool use_weight = weight_choice != UNWEIGHTED;
 

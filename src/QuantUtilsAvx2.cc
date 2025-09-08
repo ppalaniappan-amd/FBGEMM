@@ -278,23 +278,23 @@ SPECIALIZE_FUSEDDQAVX2(int8_t)
 
 #undef SPECIALIZE_FUSEDDQAVX2
 
-void FindMinMax(const float* a, float* min, float* max, int64_t len) {
+void FindMinMax(const float* m, float* min, float* max, int64_t len) {
   if (len <= 0) {
     *min = 0.0f;
     *max = 0.0f;
     return;
   }
 
-  float temp_min = *a, temp_max = *a;
+  float temp_min = *m, temp_max = *m;
   int64_t i = 0;
 
 #ifdef __AVX__
-  __m256 min_v = _mm256_set1_ps(*a), max_v = _mm256_set1_ps(*a);
+  __m256 min_v = _mm256_set1_ps(*m), max_v = _mm256_set1_ps(*m);
   constexpr int VLEN = 8;
   if (len >= VLEN) {
     for (; i < len / VLEN * VLEN; i += VLEN) {
-      min_v = _mm256_min_ps(min_v, _mm256_loadu_ps(a + i));
-      max_v = _mm256_max_ps(max_v, _mm256_loadu_ps(a + i));
+      min_v = _mm256_min_ps(min_v, _mm256_loadu_ps(m + i));
+      max_v = _mm256_max_ps(max_v, _mm256_loadu_ps(m + i));
     }
 
     float min_buf[VLEN], max_buf[VLEN];
@@ -308,8 +308,8 @@ void FindMinMax(const float* a, float* min, float* max, int64_t len) {
 #endif
 
   for (; i < len; i++) {
-    temp_min = std::min(temp_min, a[i]);
-    temp_max = std::max(temp_max, a[i]);
+    temp_min = std::min(temp_min, m[i]);
+    temp_max = std::max(temp_max, m[i]);
   }
   *min = temp_min;
   *max = temp_max;
@@ -1265,8 +1265,6 @@ void requantizeOutputProcessingGConvAvx2(
                     _mm_set1_epi32(r.B_zero_point[quant_param_idx])),
                 _mm_set1_epi32(r.B_zero_point[quant_param_idx + 1]),
                 1);
-          } else if constexpr (C_PER_G == 8) {
-            B_zero_point_v = _mm256_set1_epi32(r.B_zero_point[quant_param_idx]);
           } else {
             B_zero_point_v = _mm256_set1_epi32(r.B_zero_point[quant_param_idx]);
           }
@@ -1343,8 +1341,6 @@ void requantizeOutputProcessingGConvAvx2(
                   _mm_set1_ps(r.C_multiplier[quant_param_idx])),
               _mm_set1_ps(r.C_multiplier[quant_param_idx + 1]),
               1);
-        } else if constexpr (C_PER_G == 8) {
-          multiplier_v = _mm256_set1_ps(r.C_multiplier[quant_param_idx]);
         } else {
           multiplier_v = _mm256_set1_ps(r.C_multiplier[quant_param_idx]);
         }
@@ -1413,8 +1409,8 @@ void requantizeOutputProcessingGConvAvx2(
           _mm256_castsi256_si128(x_clamped_v));
     } // j loop vectorized
 
-    const int64_t remainder = block.col_start + block.col_size - j;
-    (void)remainder; // Suppress unused variable warning
+    const int64_t remainder [[maybe_unused]] =
+        block.col_start + block.col_size - j;
     assert(remainder == 0);
   } // i loop
 }
@@ -1762,7 +1758,8 @@ void FloatOrHalfToFused8BitRowwiseQuantizedSBFloatAvx2(
     const InputType* input,
     size_t input_rows,
     int input_columns,
-    std::uint8_t* output) {
+    std::uint8_t* output,
+    const InputType* rowwise_min_max) {
   constexpr int VLEN = 8;
   constexpr float kEpsilon = 1e-8f;
 
@@ -1781,6 +1778,8 @@ void FloatOrHalfToFused8BitRowwiseQuantizedSBFloatAvx2(
 
   const int64_t output_columns = input_columns + 2 * sizeof(float);
   float* input_row_float_for_fp16 = nullptr;
+  float min_max_row_float_for_fp16[2];
+  const auto is_valid_rowwise_min_max = (rowwise_min_max != nullptr);
   if constexpr (std::is_same_v<InputType, float16>) {
     input_row_float_for_fp16 = static_cast<float*>(
         fbgemmAlignedAlloc(64, input_columns * sizeof(float)));
@@ -1796,45 +1795,71 @@ void FloatOrHalfToFused8BitRowwiseQuantizedSBFloatAvx2(
     } else {
       input_row_float = input_row_float_for_fp16;
     }
+
+    const float* min_max_row_float = nullptr;
+    if (is_valid_rowwise_min_max) {
+      const InputType* min_max_row = rowwise_min_max + row * 2;
+
+      if constexpr (std::is_same_v<InputType, float>) {
+        min_max_row_float = reinterpret_cast<const float*>(min_max_row);
+      } else {
+        min_max_row_float_for_fp16[0] = halfToFloat(min_max_row[0]);
+        min_max_row_float_for_fp16[1] = halfToFloat(min_max_row[1]);
+        min_max_row_float = min_max_row_float_for_fp16;
+      }
+    }
+
     std::uint8_t* output_row = output + row * output_columns;
     float* output_row_scale_bias =
         reinterpret_cast<float*>(output_row + input_columns);
 
     float minimum_element = FLT_MAX;
     float maximum_element = -FLT_MAX;
-    __m256 min_v = _mm256_set1_ps(minimum_element);
-    __m256 max_v = _mm256_set1_ps(maximum_element);
-    int col = 0;
-    for (col = 0; col < input_columns / VLEN * VLEN; col += VLEN) {
-      __m256 in_v;
-      if constexpr (std::is_same<InputType, float>()) {
-        in_v = _mm256_loadu_ps(input_row_float + col);
-      } else {
-        __m128i in_half_v =
-            _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_row + col));
-        in_v = _mm256_cvtph_ps(in_half_v);
-        _mm256_store_ps(input_row_float_for_fp16 + col, in_v);
-      }
-      min_v = _mm256_min_ps(min_v, in_v);
-      max_v = _mm256_max_ps(max_v, in_v);
-    }
-    alignas(64) float min_buf[VLEN], max_buf[VLEN];
-    _mm256_store_ps(min_buf, min_v);
-    _mm256_store_ps(max_buf, max_v);
-    for (int i = 0; i < VLEN; ++i) {
-      minimum_element = std::min(minimum_element, min_buf[i]);
-      maximum_element = std::max(maximum_element, max_buf[i]);
-    }
+    if (is_valid_rowwise_min_max) {
+      minimum_element = min_max_row_float[0];
+      maximum_element = min_max_row_float[1];
 
-    for (; col < input_columns; ++col) {
-      if constexpr (std::is_same<InputType, float>()) {
-        minimum_element = std::min(minimum_element, input_row_float[col]);
-        maximum_element = std::max(maximum_element, input_row_float[col]);
-      } else {
-        float element = halfToFloat(input_row[col]);
-        input_row_float_for_fp16[col] = element;
-        minimum_element = std::min(minimum_element, element);
-        maximum_element = std::max(maximum_element, element);
+      for (int col = 0; col < input_columns; ++col) {
+        if constexpr (std::is_same<InputType, float16>()) {
+          input_row_float_for_fp16[col] = halfToFloat(input_row[col]);
+        }
+      }
+    } else {
+      __m256 min_v = _mm256_set1_ps(minimum_element);
+      __m256 max_v = _mm256_set1_ps(maximum_element);
+      int col = 0;
+
+      for (col = 0; col < input_columns / VLEN * VLEN; col += VLEN) {
+        __m256 in_v;
+        if constexpr (std::is_same<InputType, float>()) {
+          in_v = _mm256_loadu_ps(input_row_float + col);
+        } else {
+          __m128i in_half_v = _mm_loadu_si128(
+              reinterpret_cast<const __m128i*>(input_row + col));
+          in_v = _mm256_cvtph_ps(in_half_v);
+          _mm256_store_ps(input_row_float_for_fp16 + col, in_v);
+        }
+        min_v = _mm256_min_ps(min_v, in_v);
+        max_v = _mm256_max_ps(max_v, in_v);
+      }
+      alignas(64) float min_buf[VLEN], max_buf[VLEN];
+      _mm256_store_ps(min_buf, min_v);
+      _mm256_store_ps(max_buf, max_v);
+      for (int i = 0; i < VLEN; ++i) {
+        minimum_element = std::min(minimum_element, min_buf[i]);
+        maximum_element = std::max(maximum_element, max_buf[i]);
+      }
+
+      for (; col < input_columns; ++col) {
+        if constexpr (std::is_same<InputType, float>()) {
+          minimum_element = std::min(minimum_element, input_row_float[col]);
+          maximum_element = std::max(maximum_element, input_row_float[col]);
+        } else {
+          float element = halfToFloat(input_row[col]);
+          input_row_float_for_fp16[col] = element;
+          minimum_element = std::min(minimum_element, element);
+          maximum_element = std::max(maximum_element, element);
+        }
       }
     }
 
@@ -1842,9 +1867,10 @@ void FloatOrHalfToFused8BitRowwiseQuantizedSBFloatAvx2(
     output_row_scale_bias[0] = range / 255.0f;
     output_row_scale_bias[1] = minimum_element;
     const auto inverse_scale = 255.0f / (range + kEpsilon);
-    min_v = _mm256_set1_ps(minimum_element);
+    __m256 min_v = _mm256_set1_ps(minimum_element);
     __m256 inverse_scale_v = _mm256_set1_ps(inverse_scale);
 
+    int col = 0;
     for (col = 0; col < input_columns / (4 * VLEN) * (4 * VLEN);
          col += 4 * VLEN) {
       __m256i x_rounded_v = _mm256_cvtps_epi32(_mm256_mul_ps(
@@ -1914,13 +1940,13 @@ void FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfAvx2(
   constexpr int NUM_ELEM_PER_32BIT = 32 / BIT_RATE;
   // multiply by 4 because we're handling 4 vlen per iteration
   constexpr int NUM_OF_32BIT_PER_VLOAD = VLEN * 4 / NUM_ELEM_PER_32BIT;
-
-  int remainder_32bit_granularity = 0, remainder = 0;
+  int remainder = 0;
   __m128i vmask_load;
   __m256i vmask_store0, vmask_store1, vmask_store2, vmask_store3;
   if constexpr (BIT_RATE == 4 || BIT_RATE == 2) {
-    remainder_32bit_granularity = (output_columns + NUM_ELEM_PER_32BIT - 1) /
-        NUM_ELEM_PER_32BIT % NUM_OF_32BIT_PER_VLOAD;
+    int remainder_32bit_granularity =
+        (output_columns + NUM_ELEM_PER_32BIT - 1) / NUM_ELEM_PER_32BIT %
+        NUM_OF_32BIT_PER_VLOAD;
     vmask_load = _mm_lddqu_si128(reinterpret_cast<const __m128i*>(
         internal::avx2_ps_or_epi32_combined_mask + NUM_OF_32BIT_PER_VLOAD +
         (NUM_OF_32BIT_PER_VLOAD - remainder_32bit_granularity) %
@@ -2202,7 +2228,8 @@ INSTANTIATE_QuantizationAvx2FunctionsNBits(float16, 8)
       const type* input,                                                 \
       size_t input_rows,                                                 \
       int input_columns,                                                 \
-      std::uint8_t* output);                                             \
+      std::uint8_t* output,                                              \
+      const type* rowwise_min_max);                                      \
   template void Fused8BitRowwiseQuantizedSBFloatToFloatOrHalfAvx2<type>( \
       const std::uint8_t* input,                                         \
       size_t input_rows,                                                 \

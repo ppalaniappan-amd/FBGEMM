@@ -87,7 +87,7 @@ T Quantize(
   // and nearbyint(2.5) is 2.0
   // Adding zero_point before or after rounding can make a difference
   // in exactly halfway cases.
-  if (LEGACY) {
+  if constexpr (LEGACY) {
     transformed_val = std::nearbyint(zero_point + transformed_val);
   } else {
     transformed_val = zero_point + std::nearbyint(transformed_val);
@@ -318,7 +318,8 @@ FBGEMM_API void FloatOrHalfToFused8BitRowwiseQuantizedSBFloat(
     const InputType* input,
     size_t input_rows,
     int input_columns,
-    std::uint8_t* output);
+    std::uint8_t* output,
+    const InputType* rowwise_min_max = nullptr);
 
 /**
  * Convert fused rowwise quantized (8-bit) inputs to float or half outputs.
