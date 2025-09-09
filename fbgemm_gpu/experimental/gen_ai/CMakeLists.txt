@@ -173,7 +173,9 @@ gpu_cpp_library(
     -enable-post-misched=0
     -mllvm
     -greedy-reverse-local-assignment=1
-    -fhip-new-launch-api)
+    -fhip-new-launch-api
+    -DCK_USE_OCP_FP8
+    -DCK_GFX950_SUPPORT)
 
 
 
