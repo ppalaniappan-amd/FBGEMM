@@ -8,7 +8,7 @@
 
 #include "fp8_rowwise_common_testing.h"
 
-# Config for shape 1X1280X8192
+// Config for shape 1X1280X8192
 at::Tensor
 fp8fp8bf16_rowwise_256x256x192x128_16x16_8x6_8x32x1_8x32x1_1x32x1x8_8x8x1_1x2_intrawave_v3(
     at::Tensor XQ,
