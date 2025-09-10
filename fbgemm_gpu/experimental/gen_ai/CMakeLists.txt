@@ -174,8 +174,27 @@ gpu_cpp_library(
     -mllvm
     -greedy-reverse-local-assignment=1
     -fhip-new-launch-api
+    # Below flags are required for strong CK performance
+    # on certain kernel instances
     -DCK_USE_OCP_FP8
-    -DCK_GFX950_SUPPORT)
+    -DCK_GFX950_SUPPORT
+    -DCK_USE_GFX94
+    -DCK_ENABLE_FP8
+    -DCK_ENABLE_BF16
+    -DCK_USE_XDL
+    -fno-offload-uniform-block
+    -mllvm
+    # Reduce register spillage on certain kernels
+    -amdgpu-coerce-illegal-types=1
+    -mllvm
+    -enable-post-misched=0
+    -mllvm
+    -greedy-reverse-local-assignment=1
+    -mllvm --lsr-drop-solution=1
+    -mllvm -amdgpu-early-inline-all=true
+    -mllvm -amdgpu-function-calls=false
+    --offload-compress
+    -fhip-new-launch-api)
 
 
 
