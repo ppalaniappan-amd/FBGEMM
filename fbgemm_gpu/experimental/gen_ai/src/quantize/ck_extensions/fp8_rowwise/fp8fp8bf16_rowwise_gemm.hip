@@ -585,7 +585,7 @@ at::Tensor f8f8_rowwise_wrapper(
   }
 
   RowwiseKernel rowwise_impl = rowwise_dispatch(M, N, K);
-  return fp8fp8bf16_rowwise_256x256x192x128_16x16_8x6_8x32x1_8x32x1_1x32x1x8_8x8x1_1x2_intrawave_v3(XQ, WQ, x_scale, w_scale, Y);
+  return rowwise_impl(XQ, WQ, x_scale, w_scale, Y);
 }
 } // namespace
 
