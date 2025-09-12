@@ -119,7 +119,7 @@ at::Tensor f8f8_rowwise_impl(
     int KBatch = 1) {
   // Create GEMM definition.
   using DeviceGemmInstance =
-      ck::tensor_operation::device::DeviceGemmMultiD_Xdl_CShuffle_V3<
+      ck::tensor_operation::device::DeviceGemmMultiD_Xdl_CShuffle_V3_BPreshuffle<
           ALayout,
           BLayout,
           DsLayout,
