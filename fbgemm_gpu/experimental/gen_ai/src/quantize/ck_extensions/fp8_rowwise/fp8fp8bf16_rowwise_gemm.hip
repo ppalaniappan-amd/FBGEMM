@@ -19,6 +19,7 @@
 #include <c10/hip/HIPStream.h>
 
 #include "kernels/fp8fp8bf16_rowwise_kernel_manifest.h"
+#include "kernels/fp8fp8bf16_llama70_kernel_manifest.h"
 
 namespace fbgemm_gpu {
 namespace {
@@ -42,6 +43,20 @@ struct IntTupleHash {
     return hash1 ^ hash2 ^ hash3;
   }
 };
+
+
+// For high priority LLama30B, we directly map to the best kernel of MI350 GPU_SRCS
+static const std::unordered_map<std::tuple<int, int, int>, RowwiseKernel, IntTupleHash> llama70b_lookup_dispatch = {
+
+  {{1, 1280, 8192}, fp8fp8bf16_rowwise_1x1280x8192},
+  {{1, 7168, 8192}, fp8fp8bf16_rowwise_1x7168x8192},
+  {{1, 8192, 3584}, fp8fp8bf16_rowwise_1x8192x3584},
+  {{1, 8192, 1024}, fp8fp8bf16_rowwise_1x8192x1024},
+  {{128, 1280, 8192}, fp8fp8bf16_rowwise_128x1280x8192},
+  {{2048, 7168, 8192}, fp8fp8bf16_rowwise_2048x7168x8192},
+  {{2048, 8192, 3584}, fp8fp8bf16_rowwise_2048x8192x3584}
+  };
+
 
 // For certain high priority shapes, we directly map to the best kernel rather
 // than use heuristics.
@@ -470,6 +485,15 @@ RowwiseKernel rowwise_heuristic_dispatch(int M, int N, int K) {
 
 RowwiseKernel rowwise_dispatch(int M, int N, int K) {
   // For a given shape, either find the best kernel via lookup or heuristic.
+  
+  // TODO: remove this if condition later after desired performance has been met.
+
+  // llama70B high priority kernels on mi350
+  auto aw = llama70b_lookup_dispatch.find({M, N, K});
+  if (aw != llama70b_lookup_dispatch.end()){
+    return aw->second;
+  }
+  
   // For many small M shapes, we bucket them to the next largest kernel.
   // This is fine since kernels are padded anyway.
   int padded_m = M;
@@ -482,6 +506,7 @@ RowwiseKernel rowwise_dispatch(int M, int N, int K) {
   } else if (M <= 128) {
     padded_m = 128;
   }
+
   // First check if this shape is available in the direct lookup.
   auto it = rowwise_lookup_dispatch.find({padded_m, N, K});
   // If we found an optimal kernel, use it.
