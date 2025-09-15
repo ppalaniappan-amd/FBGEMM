@@ -173,7 +173,6 @@ gpu_cpp_library(
     -enable-post-misched=0
     -mllvm
     -greedy-reverse-local-assignment=1
-    -fhip-new-launch-api
     # Below flags are required for strong CK performance
     # on certain kernel instances
     -DCK_USE_OCP_FP8
@@ -185,11 +184,9 @@ gpu_cpp_library(
     -fno-offload-uniform-block
     -mllvm
     # Reduce register spillage on certain kernels
-    -amdgpu-coerce-illegal-types=1
     -mllvm
     -enable-post-misched=0
     -mllvm
-    -greedy-reverse-local-assignment=1
     -mllvm --lsr-drop-solution=1
     -mllvm -amdgpu-early-inline-all=true
     -mllvm -amdgpu-function-calls=false
