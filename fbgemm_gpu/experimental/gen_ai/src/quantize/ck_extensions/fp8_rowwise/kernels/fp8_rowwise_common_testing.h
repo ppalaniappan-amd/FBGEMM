@@ -21,7 +21,6 @@
 #include "ck/utility/blkgemmpipe_scheduler.hpp"
 #include "ck/utility/data_type.hpp"
 
-#include "ck/tensor_operation/gpu/device/impl/device_gemm_multiple_d_xdl_cshuffle_v3.hpp"
 #include "ck/tensor_operation/gpu/device/impl/device_gemm_multiple_d_xdl_cshuffle_v3_b_preshuffle.hpp"
 
 // Define commonly used types.
@@ -83,6 +82,7 @@ struct RowwiseScale {
 };
 
 using CDEElementOp = RowwiseScale;
+
 
 template <
     int BLOCK_SIZE,

@@ -48,17 +48,10 @@ struct IntTupleHash {
 // For high priority LLama30B, we directly map to the best kernel of MI350 GPU_SRCS
 static const std::unordered_map<std::tuple<int, int, int>, RowwiseKernel, IntTupleHash> llama70b_lookup_dispatch = {
 
-  {{1, 1280, 8192}, fp8fp8bf16_rowwise_1x1280x8192},
-  {{1, 7168, 8192}, fp8fp8bf16_rowwise_1x7168x8192},
+  {{1, 1280, 8192}, fp8fp8bf16_rowwise_bpreshuffle_256x12x64x256_16x16_1x1_16x16x1_16x16x1_1x16x1x16_4x4x1_1x1_interwave_v1},
+  {{1, 7168, 8192}, fp8fp8bf16_rowwise_bpreshuffle_256x16x128x256_16x16_1x2_16x16x1_16x16x1_1x16x1x16_8x8x1_1x2_intrawave_v1},
   {{1, 8192, 3584}, fp8fp8bf16_rowwise_1x8192x3584},
   {{1, 8192, 1024}, fp8fp8bf16_rowwise_1x8192x1024},
-  {{128, 1280, 8192}, fp8fp8bf16_rowwise_128x1280x8192},
-  {{2048, 7168, 8192}, fp8fp8bf16_rowwise_2048x7168x8192},
-  {{2048, 8192, 3584}, fp8fp8bf16_rowwise_2048x8192x3584},
-  {{128, 7168, 8192}, fp8fp8bf16_rowwise_128x7168x8192},
-  {{128, 8192, 1024}, fp8fp8bf16_rowwise_128x8192x1024},
-  {{128,8192,3584}, fp8fp8bf16_rowwise_128x8192x3584},
-  {{2048, 1280, 8192}, fp8fp8bf16_rowwise_2048x1280x8192}
   };
 
 

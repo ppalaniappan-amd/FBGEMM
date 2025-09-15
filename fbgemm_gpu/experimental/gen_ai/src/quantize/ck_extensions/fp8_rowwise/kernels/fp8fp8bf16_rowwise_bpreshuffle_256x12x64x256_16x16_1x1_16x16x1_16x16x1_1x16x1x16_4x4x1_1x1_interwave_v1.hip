@@ -2,7 +2,7 @@
 #include "fp8_rowwise_common_testing.h"
 
 at::Tensor
-fp8fp8bf16_rowwise_128x8192x1024(
+fp8fp8bf16_rowwise_bpreshuffle_256x12x64x256_16x16_1x1_16x16x1_16x16x1_1x16x1x16_4x4x1_1x1_interwave_v1(
     at::Tensor XQ,
     at::Tensor WQ,
     at::Tensor x_scale,
@@ -12,20 +12,20 @@ fp8fp8bf16_rowwise_128x8192x1024(
   // The smallest kernel we have available. Works well for memory bound shapes.
   return f8f8bf16_rowwise_wrapper<
       256,// block size
-      32, // Mblock
-      128, // nblock
+      16, // Mblock
+      64, // nblock
       256, // kblock
       16, // wave tile M
       16, // wave tile N
-      2, // wave map M 
-      2, // wave map N 
+      1, // wave map M 
+      1, // wave map N 
       S<16, 16, 1>, // ABLOCK_TRANSFER
       S<16, 16, 1>, // BBLOCK_TRANSFER
-      S<1, 32, 1, 8>, // CBLOCK_TRANSFER
-      S<8, 8, 1>, // CBLOCK_SPV
-      2, // CSHUFFLE_MX_PER_WAVE_PERSHUFFLE
+      S<1, 16, 1, 16>, // CBLOCK_TRANSFER
+      S<4, 4, 1>, // CBLOCK_SPV
+      1, // CSHUFFLE_MX_PER_WAVE_PERSHUFFLE
       1, // CSHUFFLE_NX_PER_WAVE_PERSHUFFLE
       ck::BlockGemmPipelineScheduler::Intrawave, // loop sched
-      ck::BlockGemmPipelineVersion::v1>(XQ, WQ, x_scale, w_scale, Y, 1);
+      ck::BlockGemmPipelineVersion::v1>(XQ, WQ, x_scale, w_scale, Y, 8);
 }
 
