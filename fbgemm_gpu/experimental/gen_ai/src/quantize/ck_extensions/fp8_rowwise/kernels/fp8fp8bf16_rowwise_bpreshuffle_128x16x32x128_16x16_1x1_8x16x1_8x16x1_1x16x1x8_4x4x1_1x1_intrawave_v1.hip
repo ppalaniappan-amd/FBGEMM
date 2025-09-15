@@ -16,7 +16,6 @@ fp8fp8bf16_rowwise_bpreshuffle_128x16x32x128_16x16_1x1_8x16x1_8x16x1_1x16x1x8_4x
     at::Tensor w_scale,
     at::Tensor Y) {
 
-  // The smallest kernel we have available. Works well for memory bound shapes.
   return f8f8bf16_rowwise_wrapper<
       128,
       16,
