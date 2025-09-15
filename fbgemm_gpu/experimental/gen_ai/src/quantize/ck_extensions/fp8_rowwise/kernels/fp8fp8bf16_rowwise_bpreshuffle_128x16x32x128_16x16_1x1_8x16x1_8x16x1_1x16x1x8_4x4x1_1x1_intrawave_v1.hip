@@ -2,7 +2,7 @@
 #include "fp8_rowwise_common_testing.h"
 
 at::Tensor
-fp8fp8bf16_rowwise_1x8192x3584(
+fp8fp8bf16_rowwise_bpreshuffle_128x16x32x128_16x16_1x1_8x16x1_8x16x1_1x16x1x8_4x4x1_1x1_intrawave_v1(
     at::Tensor XQ,
     at::Tensor WQ,
     at::Tensor x_scale,
