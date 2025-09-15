@@ -11,21 +11,21 @@ fp8fp8bf16_rowwise_bpreshuffle_256x16x128x256_16x16_1x2_16x16x1_16x16x1_1x16x1x1
 
   // The smallest kernel we have available. Works well for memory bound shapes.
   return f8f8bf16_rowwise_wrapper<
-      256,// block size
-      16, // Mblock
-      128, // nblock
-      256, // kblock
-      16, // wave tile M
-      16, // wave tile N
-      1, // wave map M 
-      2, // wave map N 
-      S<16, 16, 1>, // ABLOCK_TRANSFER
-      S<16, 16, 1>, // BBLOCK_TRANSFER
-      S<1, 16, 1, 16>, // CBLOCK_TRANSFER
-      S<8, 8, 1>, // CBLOCK_SPV
-      1, // CSHUFFLE_MX_PER_WAVE_PERSHUFFLE
-      2, // CSHUFFLE_NX_PER_WAVE_PERSHUFFLE
-      ck::BlockGemmPipelineScheduler::Intrawave, // loop sched
+      256,
+      16,
+      128,
+      256,
+      16,
+      16,
+      1,
+      2,
+      S<16, 16, 1>,
+      S<16, 16, 1>,
+      S<1, 16, 1, 16>,
+      S<8, 8, 1>,
+      1,
+      2,
+      ck::BlockGemmPipelineScheduler::Intrawave,
       ck::BlockGemmPipelineVersion::v1>(XQ, WQ, x_scale, w_scale, Y, 8);
 }
 
