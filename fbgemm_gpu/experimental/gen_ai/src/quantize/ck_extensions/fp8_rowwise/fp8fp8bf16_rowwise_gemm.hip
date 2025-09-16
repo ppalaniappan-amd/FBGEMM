@@ -501,7 +501,6 @@ RowwiseKernel rowwise_dispatch(int M, int N, int K) {
   } else if (M <= 128) {
     padded_m = 128;
   }
-
   // First check if this shape is available in the direct lookup.
   auto it = rowwise_lookup_dispatch.find({padded_m, N, K});
   // If we found an optimal kernel, use it.
