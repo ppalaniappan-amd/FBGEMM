@@ -240,6 +240,253 @@ __global__ void nope_qkv_varseq_prefill_kernel(
 }
 
 template <PositionEmbeddingMode Mode>
+__global__ void rope_xpos_qkv_varseq_prefill_cosin_cache_kernel(
+    at::PackedTensorAccessor32<at::BFloat16, 3, at::RestrictPtrTraits>
+        XQ, // [B_T][N_H][D_H]
+    at::PackedTensorAccessor32<at::BFloat16, 3, at::RestrictPtrTraits>
+        XK, // [B_T][N_KVH][D_H]
+    at::PackedTensorAccessor32<at::BFloat16, 3, at::RestrictPtrTraits>
+        XV, // [B_T][N_KVH][D_H]
+    at::PackedTensorAccessor64<at::BFloat16, 4, at::RestrictPtrTraits>
+        cache_K, // [B][MAX_T][N_KVH][D_H] or
+                 // [1][MAX_PAGES * PAGE_SIZE][N_KVH][D_H] for paged attention
+    at::PackedTensorAccessor64<at::BFloat16, 4, at::RestrictPtrTraits>
+        cache_V, // [B][MAX_T][N_KVH][D_H] or
+                 // [1][MAX_PAGES * PAGE_SIZE][N_KVH][D_H] for paged attention
+    at::PackedTensorAccessor32<at::BFloat16, 3, at::RestrictPtrTraits>
+        XQ_O, // [B_T][N_H][D]
+    int32_t* varseq_batch, // in decoding case we have T == 1 and so just pass
+                           // nullptr
+    at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> varseq_seqpos,
+    double theta,
+    double gamma,
+    double scale_base,
+    double exponent_offset,
+    int32_t* block_tables, // [B][MAX_PAGES], maps logical pages to physical
+                           // ones for paged attention
+    int32_t page_size,
+    int32_t block_tables_b_stride,
+    at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
+        varseq_cache_seqpos,
+    int64_t* actual_batch_size =
+        nullptr, // When running in CUDA graph mode, the actual batch size
+                 // can be smaller than block_tables.size(0). In this case
+                 // rows of block_tables beyond actual_batch_size are not
+                 // initialized, and using them wil cause undefined
+                 // behavior. To prevent this, when actual_batch_size is
+                 // provided, the kernel exits if the current batch index is
+                 // larger of equal to actual_batch_size,
+    bool rope_scaling = false,
+    int64_t old_context_len = 8192,
+    double scaling_factor = 16,
+    double lo_freq_factor = 1,
+    double hi_freq_factor = 32,
+    bool write_k_back = false,
+    bool update_kv = true,
+    float* rope_cos_cache_ptr =nullptr, // Raw pointer from optional tensor
+    float* rope_sin_cache_ptr=nullptr, // Raw pointer from optional tensor
+    int32_t rope_cache_stride=0,  // Stride for the cache (D_H/2)
+    int32_t max_seq_len=0 ) {
+  // Launch b_t_(sum(h)) warps.
+  auto b_t_hh = blockIdx.x * blockDim.y + threadIdx.y;
+  auto B_T = XQ.size(0);
+  int N_KVH = 0;
+  if (update_kv) {
+    N_KVH = XK.size(1);
+  } else {
+    assert(!write_k_back);
+  }
+  auto N_H = XQ.size(1);
+  auto D_H = XQ.size(2);
+  auto HH = 2 * N_KVH + N_H;
+
+  auto hh = b_t_hh % HH;
+  auto b_t = b_t_hh / HH;
+  if (b_t >= B_T) {
+    return;
+  }
+  auto seqpos_t = varseq_seqpos[b_t];
+  if (seqpos_t == -1) {
+    return;
+  }
+  auto cache_loc_t = varseq_cache_seqpos[b_t];
+  auto b = varseq_batch ? varseq_batch[b_t] : b_t;
+
+  if (actual_batch_size != nullptr && b_t >= *actual_batch_size) {
+    return;
+  }
+
+  at::BFloat16* src_row;
+  at::BFloat16* dst_row;
+  auto h = 0;
+  QKV qkv;
+  if (hh < N_H) {
+    h = hh;
+    src_row = &XQ[b_t][h][0];
+    dst_row = &XQ_O[b_t][h][0];
+    qkv = QKV::Q;
+  } else if (hh < N_H + N_KVH) {
+    h = hh - N_H;
+    src_row = &XK[b_t][h][0];
+
+    get_dst_row(
+        &dst_row,
+        cache_K,
+        b,
+        h,
+        cache_loc_t,
+        page_size,
+        block_tables,
+        block_tables_b_stride);
+    qkv = QKV::K;
+  } else {
+    h = hh - N_H - N_KVH;
+    src_row = &XV[b_t][h][0];
+    get_dst_row(
+        &dst_row,
+        cache_V,
+        b,
+        h,
+        cache_loc_t,
+        page_size,
+        block_tables,
+        block_tables_b_stride);
+    qkv = QKV::V;
+  }
+
+  // Check if rope caches are provided
+  bool use_rope_cache = (rope_cos_cache_ptr!= nullptr &&
+                         rope_sin_cache_ptr!= nullptr);
+
+  for (auto head_id = 4 * threadIdx.x; head_id < D_H;
+       head_id += kThreadsPerWarp * 4) {
+      // assert D_H % 4 == 0;
+      // load 4 elements per thread in a warp.
+      if (head_id >= D_H) {
+         return;
+      }
+
+      // Original offset calculation
+      int32_t offset_0 = ((head_id) / 2 + 0); // even
+      int32_t offset_1 = ((head_id) / 2 + 1); // odd
+
+      // Declare variables
+      double sin_0=0.0, sin_1=0.0, cos_0=1.0, cos_1=1.0;
+      double powers_0 = offset_0 * 2;
+      double powers_1 = offset_1 * 2;
+      bfx4 src;
+    *reinterpret_cast<uint2*>(&src) =
+        *reinterpret_cast<uint2*>(&src_row[head_id]);
+    if (qkv == QKV::V) {
+      if (update_kv) {
+        *reinterpret_cast<uint2*>(&dst_row[head_id]) =
+            *reinterpret_cast<uint2*>(&src);
+      }
+    }
+    else { // qk requires rope
+      if (update_kv || qkv == QKV::Q) {
+
+      // For head_id = 0, 1, 2, 3, ...
+      // We want to map to frequency indices 0, 0, 1, 1, 2, 2, ..
+        if (use_rope_cache && seqpos_t < max_seq_len &&
+          offset_1 < rope_cache_stride) { // Check the larger offset
+          // Use precalculated values
+          cos_0 = static_cast<double>(rope_cos_cache_ptr[seqpos_t * rope_cache_stride + offset_0]);
+          sin_0 = static_cast<double>(rope_sin_cache_ptr[seqpos_t * rope_cache_stride + offset_0]);
+          cos_1 = static_cast<double>(rope_cos_cache_ptr[seqpos_t * rope_cache_stride + offset_1]);
+          sin_1 = static_cast<double>(rope_sin_cache_ptr[seqpos_t * rope_cache_stride + offset_1]);
+        }
+        else {
+          // Calculate on the fly
+
+          double freqs_0 = pow(theta, powers_0 / -static_cast<double>(D_H));
+          double freqs_1 = pow(theta, powers_1 / -static_cast<double>(D_H));
+          //keeping scaling code for now, logic will be useful for later in applying scaling for precomputed cossin cache outside this kernel
+          if (rope_scaling) {
+          double lo_freq_wavelen = old_context_len / lo_freq_factor;
+          double hi_freq_wavelen = old_context_len / hi_freq_factor;
+          double wavelen_0 = 2 * M_PI / freqs_0;
+          if (wavelen_0 >= hi_freq_wavelen && wavelen_0 > lo_freq_wavelen) {
+            freqs_0 = freqs_0 / scaling_factor;
+          } else if (wavelen_0 >= hi_freq_wavelen) {
+            double smooth = (old_context_len / wavelen_0 - lo_freq_factor) /
+              (hi_freq_factor - lo_freq_factor);
+            freqs_0 =
+              (1 - smooth) * freqs_0 / scaling_factor + smooth * freqs_0;
+          }
+          double wavelen_1 = 2 * M_PI / freqs_1;
+          if (wavelen_1 >= hi_freq_wavelen && wavelen_1 > lo_freq_wavelen) {
+            freqs_1 = freqs_1 / scaling_factor;
+          } else if (wavelen_1 >= hi_freq_wavelen) {
+            double smooth = (old_context_len / wavelen_1 - lo_freq_factor) /
+              (hi_freq_factor - lo_freq_factor);
+            freqs_1 =
+              (1 - smooth) * freqs_1 / scaling_factor + smooth * freqs_1;
+          }
+          }
+        freqs_0 = static_cast<double>(seqpos_t) * freqs_0;
+        freqs_1 = static_cast<double>(seqpos_t) * freqs_1;
+
+        sincos(freqs_0, &sin_0, &cos_0);
+        sincos(freqs_1, &sin_1, &cos_1);
+        }
+        auto src_0 = bf1622float2(src.vals[0]);
+        auto src_1 = bf1622float2(src.vals[1]);
+
+        double dst_x, dst_y, dst_z, dst_w;
+
+        dst_x = static_cast<double>(src_0.x) * cos_0 -
+            static_cast<double>(src_0.y) * sin_0;
+        dst_y = static_cast<double>(src_0.y) * cos_0 +
+            static_cast<double>(src_0.x) * sin_0;
+
+        dst_z = static_cast<double>(src_1.x) * cos_1 -
+            static_cast<double>(src_1.y) * sin_1;
+        dst_w = static_cast<double>(src_1.y) * cos_1 +
+            static_cast<double>(src_1.x) * sin_1;
+
+        if (Mode == PositionEmbeddingMode::XPOS) {
+          double gamma_0 = (powers_0 + gamma * D_H) / (D_H + gamma * D_H);
+          double gamma_1 = (powers_1 + gamma * D_H) / (D_H + gamma * D_H);
+          double scale_base_ = (qkv == QKV::Q) ? scale_base : -scale_base;
+          double factor_0 = pow(
+              gamma_0,
+              (static_cast<double>(seqpos_t) - exponent_offset) / scale_base_);
+          double factor_1 = pow(
+              gamma_1,
+              (static_cast<double>(seqpos_t) - exponent_offset) / scale_base_);
+
+          dst_x *= factor_0;
+          dst_y *= factor_0;
+          dst_z *= factor_1;
+          dst_w *= factor_1;
+        }
+
+        fx4 dst;
+        dst.x = __double2float_rn(dst_x);
+        dst.y = __double2float_rn(dst_y);
+        dst.z = __double2float_rn(dst_z);
+        dst.w = __double2float_rn(dst_w);
+
+        bfx4 dst_;
+        dst_.vals[0] = __floats2bfloat162_rn(dst.x, dst.y);
+        dst_.vals[1] = __floats2bfloat162_rn(dst.z, dst.w);
+        if (update_kv || qkv == QKV::Q) {
+          *reinterpret_cast<uint2*>(&dst_row[head_id]) =
+              *reinterpret_cast<uint2*>(&dst_);
+        }
+
+        if (write_k_back && qkv == QKV::K) {
+          // Also write back to the source row
+          *reinterpret_cast<uint2*>(&src_row[head_id]) =
+              *reinterpret_cast<uint2*>(&dst_);
+        }
+      }
+    }
+  }
+}
+
+template <PositionEmbeddingMode Mode>
 __global__ void rope_xpos_qkv_varseq_prefill_kernel(
     at::PackedTensorAccessor32<at::BFloat16, 3, at::RestrictPtrTraits>
         XQ, // [B_T][N_H][D_H]
@@ -1484,7 +1731,9 @@ at::Tensor rope_qkv_varseq_prefill(
     bool k_norm = false,
     bool update_kv = true,
     std::optional<at::Tensor> amax_qkv = std::nullopt,
-    std::optional<at::Tensor> kv_quant_scale_precomputed = std::nullopt) {
+    std::optional<at::Tensor> kv_quant_scale_precomputed = std::nullopt,
+    std::optional<at::Tensor> rope_cos_cache = std::nullopt,
+    std::optional<at::Tensor> rope_sin_cache = std::nullopt) {
   auto B_T = XQ.size(0);
   auto N_H = XQ.size(1);
   auto N_KVH = 0;
@@ -1532,6 +1781,52 @@ at::Tensor rope_qkv_varseq_prefill(
         static_cast<int64_t*>(actual_batch_size.value().data_ptr());
   }
   if (cache_K.dtype() == at::kBFloat16) {
+    float* rope_cos_ptr = nullptr;
+    float* rope_sin_ptr = nullptr;
+    int32_t rope_cache_stride = 0;
+    int32_t max_seq_len = 0;
+
+  if (rope_cos_cache.has_value() && rope_sin_cache.has_value()) {
+    rope_cos_ptr = rope_cos_cache.value().data_ptr<float>();
+    rope_sin_ptr = rope_sin_cache.value().data_ptr<float>();
+    rope_cache_stride = rope_cos_cache.value().size(1); // D_H/2
+    max_seq_len = rope_cos_cache.value().size(0);
+
+     rope_xpos_qkv_varseq_prefill_cosin_cache_kernel<PositionEmbeddingMode::ROPE>
+        <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            XQ.packed_accessor32<at::BFloat16, 3, at::RestrictPtrTraits>(),
+            XK.packed_accessor32<at::BFloat16, 3, at::RestrictPtrTraits>(),
+            XV.packed_accessor32<at::BFloat16, 3, at::RestrictPtrTraits>(),
+            cache_K.packed_accessor64<at::BFloat16, 4, at::RestrictPtrTraits>(),
+            cache_V.packed_accessor64<at::BFloat16, 4, at::RestrictPtrTraits>(),
+            XQ_O.packed_accessor32<at::BFloat16, 3, at::RestrictPtrTraits>(),
+            varseq_batch.data_ptr<int32_t>(),
+            varseq_seqpos
+                .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
+            theta,
+            0,
+            0,
+            0,
+            block_tables_ptr,
+            page_size,
+            block_tables_b_stride,
+            varseq_cache_seqpos_
+                .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
+            actual_batch_size_ptr,
+            rope_scaling,
+            old_context_len,
+            scaling_factor,
+            lo_freq_factor,
+            hi_freq_factor,
+            write_k_back,
+            update_kv,
+            rope_cos_ptr,
+            rope_sin_ptr,
+            rope_cache_stride,
+            max_seq_len);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  else{
     rope_xpos_qkv_varseq_prefill_kernel<PositionEmbeddingMode::ROPE>
         <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
             XQ.packed_accessor32<at::BFloat16, 3, at::RestrictPtrTraits>(),
@@ -1561,7 +1856,8 @@ at::Tensor rope_qkv_varseq_prefill(
             write_k_back,
             update_kv);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-  } else {
+  }
+ } else {
     auto num_groups_ = num_groups ? num_groups.value() : 1;
     auto varseq_batch_ = varseq_batch.data_ptr<int32_t>();
     auto varseq_seqpos_ =

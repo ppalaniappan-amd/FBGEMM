@@ -66,7 +66,9 @@ at::Tensor rope_qkv_varseq_prefill_meta(
     bool /* k_norm */,
     bool /* update_kv */,
     std::optional<at::Tensor> /* amax_qkv */,
-    std::optional<at::Tensor> /* kv_quant_scale_precomputed */
+    std::optional<at::Tensor> /* kv_quant_scale_precomputed */,
+    std::optional<at::Tensor> /* rope_cos_cache */,
+    std::optional<at::Tensor> /* rope_cos_cache */
 ) {
   return at::empty_like(XQ);
 }
