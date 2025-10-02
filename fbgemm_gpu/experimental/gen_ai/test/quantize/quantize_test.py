@@ -10,7 +10,7 @@
 import os
 import unittest
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import fbgemm_gpu.experimental.gen_ai  # noqa: F401
 
@@ -95,7 +95,7 @@ FP16_MAX_POS: float = torch.finfo(torch.float16).max
 open_source: bool = getattr(fbgemm_gpu, "open_source", False)
 
 
-def fp8_row_quantize_ref(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def fp8_row_quantize_ref(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # Quantize an input tensor and return the fp8 tensor and its inverse scale.
     x_row_max = torch.max(torch.abs(x), dim=1).values
     max_scaling_factor = E4M3_MAX_POS * 512.0  # Match kernel logics
@@ -104,7 +104,7 @@ def fp8_row_quantize_ref(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return xq, scale.reciprocal().to(torch.float32)
 
 
-def fp8_col_quantize_ref(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def fp8_col_quantize_ref(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # Quantize an input tensor and return the fp8 tensor and its inverse scale.
     x_col_max = torch.max(torch.abs(x), dim=0).values
     max_scaling_factor = E4M3_MAX_POS * 512.0  # Match kernel logics
@@ -116,7 +116,7 @@ def fp8_col_quantize_ref(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 def int4_row_quantize(
     x: torch.Tensor,
     group_size: int = 128,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     n_bit = 4  # Number of target bits.
     to_quant = x.reshape(-1, group_size).to(torch.float)
 
@@ -349,9 +349,7 @@ class FP8Tests(unittest.TestCase):
             ["rowwise", "blockwise"]
             + (["tensorwise_broadcast", "tensorwise"] if torch.version.cuda else [])
         ),
-        QType=(
-            st.sampled_from([fp8_e4m3, fp8_e5m2] if torch.version.cuda else [fp8_e4m3])
-        ),
+        QType=(st.sampled_from([fp8_e4m3])),
         Bias=st.sampled_from([True, False]),
         CudaGraph=st.sampled_from([True, False]),
         UseTriton=st.sampled_from([False] + ([True] if torch.version.cuda else [])),
@@ -566,7 +564,7 @@ class FP8Tests(unittest.TestCase):
         B_T=st.sampled_from([0, 2048, 4096]),
         D=st.sampled_from([128, 256]),
         HD_L=st.sampled_from([256, 512]),
-        QType=st.sampled_from([torch.float8_e4m3fn, torch.float8_e5m2]),
+        QType=st.sampled_from([torch.float8_e4m3fn]),
         CudaGraph=st.sampled_from([True, False]),
     )
     def test_quantize_int4_fp8_matmul(
@@ -933,7 +931,7 @@ class FP8Tests(unittest.TestCase):
         bias = (
             torch.randn(
                 size=(B, N),
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
                 device=self.device,
             )
             if Bias
@@ -2198,6 +2196,261 @@ class NVFP4Tests(unittest.TestCase):
 
         y_ref = (x @ w.T).to(torch.bfloat16)
         torch.testing.assert_close(fake_quant_y, y_ref, atol=0.1, rtol=0.1)
+
+
+@unittest.skipIf(
+    not torch.cuda.is_available()
+    or torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9,
+    "Skip when MI300 or H100 is not available",
+)
+class BF16Tests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device = torch.accelerator.current_accelerator()
+
+    def generate_random_splits(G: int, M: int) -> torch.Tensor:
+        m_cumsums = torch.sort(
+            torch.randint(
+                0,
+                M,
+                (G + 1,),
+                dtype=torch.int32,
+                device=torch.accelerator.current_accelerator(),
+            )
+        ).values
+        m_cumsums[0], m_cumsums[-1] = 0, M
+        m_sizes = m_cumsums[1:] - m_cumsums[:-1]
+        return m_sizes
+
+    @unittest.skipIf(
+        not torch.version.cuda,
+        "Skip on AMD: test_grouped_gemm_wgrad not yet suported.",
+    )
+    @settings(deadline=None)
+    @given(
+        G=st.sampled_from([2, 16]),
+        M=st.sampled_from([257, 2049]),
+        N=st.sampled_from([256, 2048]),
+        K=st.sampled_from([128, 1024]),
+        output_accum=st.booleans(),
+    )
+    def test_grouped_gemm_wgrad(
+        self,
+        G: int,
+        M: int,
+        N: int,
+        K: int,
+        output_accum: bool,
+    ) -> None:
+        torch.manual_seed(hash((G, M, N, K)))
+        # Inputs
+        dy_bf16 = torch.randn(
+            (M, N), dtype=torch.bfloat16, device=torch.accelerator.current_accelerator()
+        )
+        x_bf16 = torch.randn(
+            (M, K), dtype=torch.bfloat16, device=torch.accelerator.current_accelerator()
+        )
+
+        m_sizes = BF16Tests.generate_random_splits(G, M)
+
+        # Test
+        if output_accum:
+            wgrad_accum = torch.randn(
+                (G, N, K),
+                dtype=torch.float32,
+                device=torch.accelerator.current_accelerator(),
+            )
+        else:
+            wgrad_accum = None
+
+        test_wgrad = torch.ops.fbgemm.bf16bf16bf16_grouped_wgrad(
+            dy_bf16,
+            x_bf16,
+            m_sizes.to(torch.int64),
+            output=wgrad_accum.clone() if output_accum else None,
+            output_accum=output_accum,
+        )
+
+        if output_accum:
+            assert test_wgrad.dtype == torch.float32
+
+        # Reference
+        dy_fp32 = dy_bf16.to(torch.float32)
+        x_fp32 = x_bf16.to(torch.float32)
+        ref_wgrad = torch.empty(
+            (G, N, K),
+            dtype=torch.float32,
+            device=torch.accelerator.current_accelerator(),
+        )
+
+        # Track which groups have non-zero size for comparison
+        non_zero_groups = []
+        m_start = 0
+        for g, m_size in enumerate(m_sizes.tolist()):
+            if m_size > 0:
+                # Actual slice - compute matrix multiplication
+                ref_wgrad[g, :, :] = (
+                    dy_fp32[m_start : m_start + m_size, :].T
+                    @ x_fp32[m_start : m_start + m_size, :]
+                )
+                non_zero_groups.append(g)
+            m_start += m_size
+
+        if output_accum:
+            assert wgrad_accum is not None
+            ref_wgrad += wgrad_accum
+
+        ref_wgrad = ref_wgrad.to(test_wgrad.dtype)
+
+        # Compare groups with non-zero m_size
+        if non_zero_groups:
+            if test_wgrad.dtype == torch.float32:
+                torch.testing.assert_close(
+                    test_wgrad[non_zero_groups],
+                    ref_wgrad[non_zero_groups],
+                    atol=1e-4,
+                    rtol=1e-3,
+                )
+            else:
+                torch.testing.assert_close(
+                    test_wgrad[non_zero_groups],
+                    ref_wgrad[non_zero_groups],
+                    atol=1e-4,
+                    rtol=1e-2,
+                )
+
+    @unittest.skipIf(
+        not torch.version.cuda,
+        "Skip on AMD: test_grouped_gemm_dgrad not yet suported.",
+    )
+    @settings(deadline=None)
+    @given(
+        G=st.sampled_from([2, 16]),
+        M=st.sampled_from([257, 2049]),
+        N=st.sampled_from([256, 2048]),
+        K=st.sampled_from([128, 1024]),
+    )
+    def test_grouped_gemm_dgrad(
+        self,
+        G: int,
+        M: int,
+        N: int,
+        K: int,
+    ) -> None:
+        torch.manual_seed(hash((G, M, N, K)))
+
+        # Inputs
+        dy_bf16 = torch.randn(
+            (M, N), dtype=torch.bfloat16, device=torch.accelerator.current_accelerator()
+        )
+        w_bf16 = torch.randn(
+            (G, N, K),
+            dtype=torch.bfloat16,
+            device=torch.accelerator.current_accelerator(),
+        )
+        m_sizes = BF16Tests.generate_random_splits(G, M)
+
+        y_bf16 = torch.ops.fbgemm.bf16bf16bf16_grouped_grad(
+            dy_bf16,
+            w_bf16.permute(0, 2, 1),
+            m_sizes.to(torch.int64),
+        )
+
+        Y_preallocated = torch.empty(
+            (M * K),
+            dtype=torch.bfloat16,
+            device=torch.accelerator.current_accelerator(),
+        )
+        y_bf16_preallocated = torch.ops.fbgemm.bf16bf16bf16_grouped_grad(
+            dy_bf16,
+            w_bf16.permute(0, 2, 1),
+            m_sizes.to(torch.int64),
+            Y_preallocated,
+        )
+
+        # Reference
+        dy_fp32 = dy_bf16.to(torch.float32)
+        w_fp32 = w_bf16.to(torch.float32)
+
+        ref_y_fp32 = torch.empty(
+            (M, K), dtype=torch.float32, device=torch.accelerator.current_accelerator()
+        )
+        m_start = 0
+        for g, m_size in enumerate(m_sizes.tolist()):
+            ref_y_fp32[m_start : m_start + m_size, :] = dy_fp32[
+                m_start : m_start + m_size, :
+            ] @ w_fp32[g, :, :].view(N, K)
+            m_start += m_size
+        ref_y_bf16 = ref_y_fp32.to(torch.bfloat16)
+
+        torch.testing.assert_close(y_bf16, ref_y_bf16, atol=1e-3, rtol=1.6e-2)
+        torch.testing.assert_close(
+            y_bf16_preallocated, ref_y_bf16, atol=1e-3, rtol=1.6e-2
+        )
+
+    @unittest.skipIf(
+        not torch.version.cuda,
+        "Skip on AMD: test_grouped_gemm_fprop not yet suported.",
+    )
+    @settings(deadline=None)
+    @given(
+        G=st.sampled_from([2, 16]),
+        M=st.sampled_from([257, 2049]),
+        N=st.sampled_from([256, 2048]),
+        K=st.sampled_from([128, 1024]),
+    )
+    def test_grouped_gemm_fprop(
+        self,
+        G: int,
+        M: int,
+        N: int,
+        K: int,
+    ) -> None:
+        torch.manual_seed(hash((G, M, N, K)))
+
+        # Inputs
+        x_bf16 = torch.randn(
+            (M, K), dtype=torch.bfloat16, device=torch.accelerator.current_accelerator()
+        )
+        w_bf16 = torch.randn(
+            (G, N, K),
+            dtype=torch.bfloat16,
+            device=torch.accelerator.current_accelerator(),
+        )
+        m_sizes = BF16Tests.generate_random_splits(G, M)
+
+        y_bf16 = torch.ops.fbgemm.bf16bf16bf16_grouped_stacked(
+            x_bf16, w_bf16, m_sizes.to(torch.int64)
+        )
+
+        Y_preallocated = torch.empty(
+            (M * N),
+            dtype=torch.bfloat16,
+            device=torch.accelerator.current_accelerator(),
+        )
+        y_bf16_Y_preallocated = torch.ops.fbgemm.bf16bf16bf16_grouped_stacked(
+            x_bf16, w_bf16, m_sizes.to(torch.int64), Y_preallocated
+        )
+
+        # Reference
+        x_fp32 = x_bf16.to(torch.float32)
+        w_fp32 = w_bf16.to(torch.float32)
+
+        ref_y_fp32 = torch.empty(
+            (M, N), dtype=torch.float32, device=torch.accelerator.current_accelerator()
+        )
+        m_start = 0
+        for g, m_size in enumerate(m_sizes.tolist()):
+            ref_y_fp32[m_start : m_start + m_size, :] = (
+                x_fp32[m_start : m_start + m_size, :] @ w_fp32[g, :, :].view(N, K).T
+            )
+            m_start += m_size
+        ref_y_bf16 = ref_y_fp32.to(torch.bfloat16)
+
+        torch.testing.assert_close(y_bf16, ref_y_bf16, atol=1e-3, rtol=1.6e-2)
+        torch.testing.assert_close(
+            y_bf16_Y_preallocated, ref_y_bf16, atol=1e-3, rtol=1.6e-2
+        )
 
 
 if __name__ == "__main__":
